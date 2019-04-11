@@ -232,6 +232,19 @@ cst_wave *mimic_text_to_wave(const char *text, cst_voice *voice)
     return w;
 }
 
+cst_wave *mimic_phones_to_wave(const char *text, cst_voice *voice)
+{
+    cst_utterance *u;
+    cst_wave *w;
+
+    if ((u = mimic_synth_phones(text, voice)) == NULL)
+        return NULL;
+
+    w = copy_wave(utt_wave(u));
+    delete_utterance(u);
+    return w;
+}
+
 int mimic_file_to_speech(const char *filename, cst_voice *voice,
                          const char *outtype, float *dur)
 {

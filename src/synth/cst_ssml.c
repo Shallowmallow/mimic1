@@ -321,7 +321,7 @@ static cst_utterance *ssml_apply_tag(const char *tag,
     return u;
 }
 
-static float mimic_ssml_to_speech_ts(cst_tokenstream *ts, cst_voice *voice,
+float mimic_ssml_to_speech_ts(cst_tokenstream *ts, cst_voice *voice,
                                      const char *outtype, float *durs)
 {
     /* This is a very ugly function, that might be better written with gotos */
@@ -347,7 +347,8 @@ static float mimic_ssml_to_speech_ts(cst_tokenstream *ts, cst_voice *voice,
 
     if ((durs == NULL) || (voice == NULL) || (ts == NULL) || (outtype == NULL))
     {
-        return -EINVAL;
+        // TEMP
+       // return -EINVAL;
     }
     ssml_feats = new_features();
     feat_set(ssml_feats, "current_voice", userdata_val(voice));
@@ -511,6 +512,203 @@ static float mimic_ssml_to_speech_ts(cst_tokenstream *ts, cst_voice *voice,
     delete_features(ssml_feats);
     delete_features(ssml_word_feats);
     return err;
+}
+
+
+cst_wave *mimic_ssml_to_speech_wav(cst_tokenstream *ts, cst_voice *voice,
+                                     const char *outtype, float *durs)
+{
+    /* This is a very ugly function, that might be better written with gotos */
+    /* This just doesn't seem to be properly functions -- perhaps a proper */
+    /* consumer/producer threaded model might be better here -- but its */
+    /* not clear.  There is so much have-to-be-done-now vs note-for-later */
+    /* code, that the code is far from clear, and probably not right */
+    cst_features *ssml_feats, *ssml_word_feats;
+    cst_features *attributes;
+    const char *token = "";
+    char *tag = NULL;
+    cst_utterance *utt;
+    cst_relation *tokrel;
+    int num_tokens;
+    cst_breakfunc breakfunc = default_utt_break;
+    cst_uttfunc utt_user_callback = 0;
+    cst_item *t;
+    cst_voice *current_voice;
+    int ssml_eou = 0;
+    const cst_wave *wave;
+    cst_wave *w;
+    int err = 0;
+    cst_errmsg("ssml speech ts\n");
+
+    if ((durs == NULL) || (voice == NULL) || (ts == NULL) || (outtype == NULL))
+    {
+       // return -EINVAL;
+    }
+    cst_errmsg("ssml speech ts01\n");
+    ssml_feats = new_features();
+    feat_set(ssml_feats, "current_voice", userdata_val(voice));
+    feat_set(ssml_feats, "default_voice", userdata_val(voice));
+    ssml_word_feats = new_features();
+    set_charclasses(ts,
+                    " \t\n\r",
+                    ssml_singlecharsymbols_general,
+                    get_param_string(voice->features, "text_prepunctuation",
+                                     ""), get_param_string(voice->features,
+                                                           "text_postpunctuation",
+                                                           ""));
+
+    if (feat_present(voice->features, "utt_break"))
+        breakfunc = val_breakfunc(feat_val(voice->features, "utt_break"));
+
+    if (feat_present(voice->features, "utt_user_callback"))
+        utt_user_callback =
+            val_uttfunc(feat_val(voice->features, "utt_user_callback"));
+
+    /* If its a file to write to, create and save an empty wave file */
+    /* as we are going to incrementally append to it                 */
+    if (!cst_streq(outtype, "play") &&
+        !cst_streq(outtype, "none") && !cst_streq(outtype, "stream"))
+    {
+        w = new_wave();
+        if (cst_wave_resize(w, 0, 1) == 0)
+        {
+            cst_wave_set_sample_rate(w, 16000);
+            cst_wave_save_riff(w, outtype); /* an empty wave */
+        }
+        delete_wave(w);
+    }
+   cst_errmsg("ssml speech ts1\n");
+
+    num_tokens = 0;
+    utt = new_utterance();
+
+    tokrel = utt_relation_create(utt, "Token");
+    while (!ts_eof(ts) || num_tokens > 0)
+    {
+        current_voice =
+            (cst_voice *) val_userdata(feat_val(ssml_feats, "current_voice"));
+        /* printf("awb_debug prewhile %d %s\n",ssml_eou,token); */
+        if (ssml_eou == 0)
+            token = ts_get(ts);
+        else
+        {
+            if (!cst_streq("<", token))
+                token = ts_get(ts);
+            ssml_eou = 0;
+        }
+        while ((cst_streq("<", token)) && (ssml_eou == 0))
+        {                       /* A tag -- look ahead and process it to find out how to advance */
+            tag = cst_upcase(ts_get(ts));
+            /* printf("awb_debug tag is %s\n",tag); */
+            if (cst_streq("/", tag))    /* an end tag */
+            {
+                cst_free(tag);
+                tag = NULL;
+                tag = cst_upcase(ts_get(ts));
+                attributes = ssml_get_attributes(ts);
+                feat_set_string(attributes, "_type", "end");
+            }
+            else
+                attributes = ssml_get_attributes(ts);
+            token = ts_get(ts); /* skip ">" */
+            if (ssml_apply_tag
+                (tag, attributes, utt, ssml_word_feats, ssml_feats))
+                ssml_eou = 0;
+            else
+                ssml_eou = 1;
+
+            delete_features(attributes);
+            cst_free(tag);
+            tag = NULL;
+        }
+
+        if ((cst_strlen(token) == 0) || (num_tokens > 500) ||   /* need an upper bound */
+            (ssml_eou == 1) ||  /* ssml tag was utterance break */
+            (relation_head(tokrel) && breakfunc(ts, token, tokrel)))
+        {
+            /* An end of utt, so synthesize it */
+            if (utt_user_callback)
+                utt = (utt_user_callback) (utt);
+
+            if (utt)
+            {
+                float new_durs;
+                utt = mimic_do_synth(utt, current_voice, utt_synth_tokens);
+                if (feat_present(utt->features, "Interrupted"))
+                {
+                    delete_utterance(utt);
+                    utt = NULL;
+                    break;
+                }
+                err = mimic_process_output(utt, outtype, TRUE, &new_durs);
+                if (err < 0)
+                    goto cleanup;
+                *durs += new_durs;
+                delete_utterance(utt);
+                utt = NULL;
+            }
+            else
+                break;
+
+            if (ts_eof(ts))
+                break;
+
+            utt = new_utterance();
+            tokrel = utt_relation_create(utt, "Token");
+            num_tokens = 0;
+        }
+
+        if (feat_present(ssml_word_feats, "ssml_play_audio"))
+        {
+            float new_durs;
+            wave = val_wave(feat_val(ssml_word_feats, "ssml_play_audio"));
+            /* Should create an utterances with the waveform in it */
+            /* Have to stream it if there is streaming */
+            if (utt)
+                delete_utterance(utt);
+            utt = utt_synth_wave(copy_wave(wave), current_voice);
+            if (utt == NULL)
+               goto cleanup;
+            if (utt_user_callback)
+                utt = (utt_user_callback) (utt);
+            mimic_process_output(utt, outtype, TRUE, &new_durs);
+            if (err < 0)
+                goto cleanup;
+            *durs += new_durs;
+            delete_utterance(utt);
+            utt = NULL;
+
+            utt = new_utterance();
+            tokrel = utt_relation_create(utt, "Token");
+            num_tokens = 0;
+
+            feat_remove(ssml_word_feats, "ssml_play_audio");
+        }
+        else if (!cst_streq("<", token))
+        {                       /* wasn't an ssml tag */
+            num_tokens++;
+
+            t = relation_append(tokrel, NULL);
+            item_set_string(t, "name", token);
+            item_set_string(t, "whitespace", ts->whitespace);
+            item_set_string(t, "prepunctuation", ts->prepunctuation);
+            item_set_string(t, "punc", ts->postpunctuation);
+            /* Mark it at the beginning of the token */
+            item_set_int(t, "file_pos",
+                         /* as we are already on the next char */
+                         ts->file_pos - (1 + cst_strlen(token) +
+                              cst_strlen(ts->prepunctuation) +
+                              cst_strlen(ts->postpunctuation)));
+            item_set_int(t, "line_number", ts->line_number);
+            feat_copy_into(ssml_word_feats, item_feats(t));
+        }
+    }
+   cst_errmsg("ssml speech ts2\n");
+  cleanup:
+    delete_utterance(utt);
+    delete_features(ssml_feats);
+    delete_features(ssml_word_feats);
+    return wave;
 }
 
 int mimic_ssml_file_to_speech(const char *filename, cst_voice *voice,

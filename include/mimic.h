@@ -91,10 +91,15 @@ extern "C" {
 
 /* Lower lever user functions */
     cst_wave *mimic_text_to_wave(const char *text, cst_voice *voice);
+    cst_wave *mimic_phones_to_wave(const char *text, cst_voice *voice);
     cst_utterance *mimic_synth_text(const char *text, cst_voice *voice);
     cst_utterance *mimic_synth_phones(const char *phones, cst_voice *voice);
 
     int mimic_ts_to_speech(cst_tokenstream *ts, cst_voice *voice,
+                           const char *outtype, float *dur);
+    float mimic_ssml_to_speech_ts(cst_tokenstream *ts, cst_voice *voice,
+                           const char *outtype, float *dur);
+    cst_wave *mimic_ssml_to_speech_wav(cst_tokenstream *ts, cst_voice *voice,
                            const char *outtype, float *dur);
     cst_utterance *mimic_do_synth(cst_utterance *u,
                                   cst_voice *voice, cst_uttfunc synth);
